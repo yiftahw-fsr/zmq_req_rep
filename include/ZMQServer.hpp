@@ -71,12 +71,18 @@ protected:
         zmq::socket_t sock{ctx, zmq::socket_type::rep};
         sock.bind(addr_);
 
+        // Set receive timeout to periodically check running_ flag
+        sock.set(zmq::sockopt::rcvtimeo, 100);  // 100ms timeout
+
         while (running_) {
             zmq::message_t header_msg;
-            if (!sock.recv(header_msg, zmq::recv_flags::none)) continue;
+            auto recv_result = sock.recv(header_msg, zmq::recv_flags::none);
+            if (!recv_result.has_value()) {
+                // Timeout or error - check running_ flag and continue
+                continue;
+            }
 
             if (header_msg.size() != sizeof(Header)) {
-                std::cerr << "Header size mismatch\n";
                 continue;
             }
 
@@ -84,7 +90,10 @@ protected:
             std::memcpy(&hdr, header_msg.data(), sizeof(hdr));
 
             zmq::message_t payload_msg;
-            if (!sock.recv(payload_msg, zmq::recv_flags::none)) continue;
+            if (!sock.recv(payload_msg, zmq::recv_flags::none)) {
+                // Failed to receive payload, skip
+                continue;
+            }
 
             zmq::message_t reply_msg;
 
