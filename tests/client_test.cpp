@@ -14,7 +14,6 @@ protected:
     void SetUp() override {
         service = std::make_unique<ExampleService>(EXAMPLE_SERVICE_ADDRESS);
         service->start();
-        std::cout << "Service started, waiting briefly for it to initialize...\n";
     }
 
     void TearDown() override {
@@ -67,5 +66,40 @@ TEST_F(ClientTestFixture, MultipleRequests) {
             EXAMPLE_SERVICE_ADDRESS, header, request, 1000ms);
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result.value().result, 49);
+    }
+}
+
+TEST_F(ClientTestFixture, ServerRecoveryAfterMalformedRequest) {
+    // Send a malformed request (header only, no payload)
+    try {
+        zmq::context_t ctx{1};
+        zmq::socket_t sock{ctx, zmq::socket_type::req};
+        sock.set(zmq::sockopt::rcvtimeo, 500);
+        sock.set(zmq::sockopt::sndtimeo, 500);
+        sock.connect(EXAMPLE_SERVICE_ADDRESS);
+        
+        // Send only header without payload (malformed)
+        Header header{ExampleAPIType::POW2};
+        zmq::message_t header_msg(&header, sizeof(header));
+        sock.send(header_msg, zmq::send_flags::none);
+        
+        // Try to receive response (may timeout or get empty response)
+        zmq::message_t reply;
+        const auto recv_result = sock.recv(reply, zmq::recv_flags::none);
+        ASSERT_TRUE(!recv_result.has_value() || recv_result.value() == 0);
+        std::cout << "Malformed request sent, server should handle it\n";
+
+        // Now send a valid request - server should recover and handle it
+        Header header2{ExampleAPIType::ADD};
+        AddRequest request{15, 25};
+        auto result = request_and_wait_response<Header, AddRequest, AddReply>(
+            EXAMPLE_SERVICE_ADDRESS, header2, request, 1000ms);
+
+        ASSERT_TRUE(result.has_value()) << "Server failed to recover after malformed request";
+        EXPECT_EQ(result.value().result, 40) << "Server returned wrong result after recovery";
+    }
+    catch (const zmq::error_t &e)
+    {
+        FAIL() << "Unexpected ZMQ error after malformed request: " << e.what();
     }
 }
