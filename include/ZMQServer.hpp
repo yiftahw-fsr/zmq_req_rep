@@ -10,9 +10,26 @@
 #include <thread>
 #include <memory>
 #include <type_traits>
+#include "ZMQProtocol.hpp"
 
-struct Header {
-    uint32_t endpoint_id;
+struct ServerReply {
+    zmq::message_t header;
+    zmq::message_t payload;
+    bool has_payload;
+    
+    ServerReply(const ReplyHeader& reply_hdr) : has_payload(false) {
+        header = zmq::message_t(sizeof(ReplyHeader));
+        std::memcpy(header.data(), &reply_hdr, sizeof(ReplyHeader));
+    }
+    
+    template<typename T>
+    ServerReply(const ReplyHeader& reply_hdr, const T& payload_data) : has_payload(true) {
+        header = zmq::message_t(sizeof(ReplyHeader));
+        std::memcpy(header.data(), &reply_hdr, sizeof(ReplyHeader));
+        
+        payload = zmq::message_t(sizeof(T));
+        std::memcpy(payload.data(), &payload_data, sizeof(T));
+    }
 };
 
 class ZMQServer {
@@ -32,24 +49,25 @@ public:
              std::is_standard_layout_v<Rep>
     void register_handler(uint32_t endpoint_id, std::function<Rep(Req)> handler)
     {
-        auto wrapper = [handler = std::move(handler)](std::vector<zmq::message_t>& msgs) -> zmq::message_t {
+        // Type erasure wrapper to have a homogeneous dispatch table
+        auto wrapper = [handler = std::move(handler)](std::vector<zmq::message_t>& msgs) -> ServerReply {
             if (msgs.size() != 2) {
                 std::cerr << "Expected 2 message parts, got " << msgs.size() << "\n";
-                return zmq::message_t{};
+                return ServerReply(ReplyHeader{ReplyStatus::BAD_REQUEST});
             }
 
             // First message is header
-            if (msgs[0].size() != sizeof(Header)) {
-                std::cerr << "Header size mismatch: expected " << sizeof(Header)
+            if (msgs[0].size() != sizeof(RequestHeader)) {
+                std::cerr << "RequestHeader size mismatch: expected " << sizeof(RequestHeader)
                           << ", got " << msgs[0].size() << "\n";
-                return zmq::message_t{};
+                return ServerReply(ReplyHeader{ReplyStatus::BAD_REQUEST});
             }
 
             // Second message is payload
             if (msgs[1].size() != sizeof(Req)) {
                 std::cerr << "Payload size mismatch: expected " << sizeof(Req)
                           << ", got " << msgs[1].size() << "\n";
-                return zmq::message_t{};
+                return ServerReply(ReplyHeader{ReplyStatus::BAD_REQUEST});
             }
 
             Req payload;
@@ -57,9 +75,7 @@ public:
 
             Rep reply_struct = handler(payload);
 
-            zmq::message_t reply_msg(sizeof(Rep));
-            std::memcpy(reply_msg.data(), &reply_struct, sizeof(Rep));
-            return reply_msg;
+            return ServerReply(ReplyHeader{ReplyStatus::OK}, reply_struct);
         };
 
         dispatch_table_[endpoint_id] = std::move(wrapper);
@@ -103,32 +119,37 @@ protected:
             }
 
             // First part should be the header
-            if (msgs.size() < 1 || msgs[0].size() != sizeof(Header)) {
+            if (msgs.size() < 1 || msgs[0].size() != sizeof(RequestHeader)) {
                 std::cerr << "Invalid message format\n";
-                // Send empty reply to keep REQ/REP state machine valid
-                zmq::message_t empty_reply;
-                sock.send(empty_reply, zmq::send_flags::none);
+                auto error_reply = ServerReply(ReplyHeader{ReplyStatus::BAD_REQUEST});
+                sock.send(error_reply.header, zmq::send_flags::none);
                 continue;
             }
 
-            Header hdr;
+            RequestHeader hdr;
             std::memcpy(&hdr, msgs[0].data(), sizeof(hdr));
 
-            zmq::message_t reply_msg;
+            ServerReply reply(ReplyHeader{ReplyStatus::NOT_FOUND});
 
             auto it = dispatch_table_.find(hdr.endpoint_id);
             if (it != dispatch_table_.end()) {
-                reply_msg = it->second(msgs);
+                reply = it->second(msgs);
             } else {
                 std::cerr << "No handler for endpoint " << hdr.endpoint_id << "\n";
             }
 
-            sock.send(reply_msg, zmq::send_flags::none);
+            // Send reply (header always, payload if present)
+            if (reply.has_payload) {
+                sock.send(reply.header, zmq::send_flags::sndmore);
+                sock.send(reply.payload, zmq::send_flags::none);
+            } else {
+                sock.send(reply.header, zmq::send_flags::none);
+            }
         }
     }
 
     std::string addr_;
-    std::unordered_map<uint32_t, std::function<zmq::message_t(std::vector<zmq::message_t>&)>> dispatch_table_;
+    std::unordered_map<uint32_t, std::function<ServerReply(std::vector<zmq::message_t>&)>> dispatch_table_;
     std::thread server_thread_;
     bool running_ = false;
 };

@@ -2,6 +2,7 @@
 #include <thread>
 #include <chrono>
 #include <iostream>
+#include <zmq_addon.hpp>
 #include "ZMQClient.hpp"
 #include "ZMQServer.hpp"
 #include "ExampleService.hpp"
@@ -26,10 +27,10 @@ protected:
 };
 
 TEST_F(ClientTestFixture, AddMode) {
-    Header header{ExampleAPIType::ADD};
+    RequestHeader header{ExampleAPIType::ADD};
     AddRequest request{5, 3};
     
-    auto result = request_and_wait_response<Header, AddRequest, AddReply>(
+    auto result = request_and_wait_response<RequestHeader, AddRequest, AddReply>(
         EXAMPLE_SERVICE_ADDRESS, header, request, 1000ms);
     
     ASSERT_TRUE(result.has_value());
@@ -37,10 +38,10 @@ TEST_F(ClientTestFixture, AddMode) {
 }
 
 TEST_F(ClientTestFixture, Pow2Mode) {
-    Header header{ExampleAPIType::POW2};
+    RequestHeader header{ExampleAPIType::POW2};
     Pow2Request request{5};
     
-    auto result = request_and_wait_response<Header, Pow2Request, Pow2Reply>(
+    auto result = request_and_wait_response<RequestHeader, Pow2Request, Pow2Reply>(
         EXAMPLE_SERVICE_ADDRESS, header, request, 1000ms);
     
     ASSERT_TRUE(result.has_value());
@@ -50,9 +51,9 @@ TEST_F(ClientTestFixture, Pow2Mode) {
 TEST_F(ClientTestFixture, MultipleRequests) {
     // ADD request
     {
-        Header header{ExampleAPIType::ADD};
+        RequestHeader header{ExampleAPIType::ADD};
         AddRequest request{10, 20};
-        auto result = request_and_wait_response<Header, AddRequest, AddReply>(
+        auto result = request_and_wait_response<RequestHeader, AddRequest, AddReply>(
             EXAMPLE_SERVICE_ADDRESS, header, request, 1000ms);
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result.value().result, 30);
@@ -60,9 +61,9 @@ TEST_F(ClientTestFixture, MultipleRequests) {
     
     // POW2 request
     {
-        Header header{ExampleAPIType::POW2};
+        RequestHeader header{ExampleAPIType::POW2};
         Pow2Request request{7};
-        auto result = request_and_wait_response<Header, Pow2Request, Pow2Reply>(
+        auto result = request_and_wait_response<RequestHeader, Pow2Request, Pow2Reply>(
             EXAMPLE_SERVICE_ADDRESS, header, request, 1000ms);
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(result.value().result, 49);
@@ -70,36 +71,30 @@ TEST_F(ClientTestFixture, MultipleRequests) {
 }
 
 TEST_F(ClientTestFixture, ServerRecoveryAfterMalformedRequest) {
-    // Send a malformed request (header only, no payload)
-    try {
-        zmq::context_t ctx{1};
-        zmq::socket_t sock{ctx, zmq::socket_type::req};
-        sock.set(zmq::sockopt::rcvtimeo, 500);
-        sock.set(zmq::sockopt::sndtimeo, 500);
-        sock.connect(EXAMPLE_SERVICE_ADDRESS);
-        
-        // Send only header without payload (malformed)
-        Header header{ExampleAPIType::POW2};
-        zmq::message_t header_msg(&header, sizeof(header));
-        sock.send(header_msg, zmq::send_flags::none);
-        
-        // Try to receive response (may timeout or get empty response)
-        zmq::message_t reply;
-        const auto recv_result = sock.recv(reply, zmq::recv_flags::none);
-        ASSERT_TRUE(!recv_result.has_value() || recv_result.value() == 0);
-        std::cout << "Malformed request sent, server should handle it\n";
+    // Define empty structs to simulate malformed/invalid payload
+    struct EmptyRequest {};
+    struct EmptyReply {};
+    
+    // Send a malformed request using the API with empty payload
+    RequestHeader header{ExampleAPIType::ADD};
+    EmptyRequest empty_request{};
+    auto malformed_result = request_and_wait_response<RequestHeader, EmptyRequest, EmptyReply>(
+        EXAMPLE_SERVICE_ADDRESS, header, empty_request, 500ms);
+    
+    // Should fail with BAD_REQUEST error
+    ASSERT_FALSE(malformed_result.has_value()) << "Malformed request should fail";
+    
+    std::cout << "Malformed request rejected with error: " << malformed_result.error() << "\n";
+    
+    // Give server a moment to be ready for next request
+    std::this_thread::sleep_for(100ms);
+    
+    // Now send a valid request - server should recover and handle it
+    RequestHeader header2{ExampleAPIType::ADD};
+    AddRequest request{15, 25};
+    auto result = request_and_wait_response<RequestHeader, AddRequest, AddReply>(
+        EXAMPLE_SERVICE_ADDRESS, header2, request, 1000ms);
 
-        // Now send a valid request - server should recover and handle it
-        Header header2{ExampleAPIType::ADD};
-        AddRequest request{15, 25};
-        auto result = request_and_wait_response<Header, AddRequest, AddReply>(
-            EXAMPLE_SERVICE_ADDRESS, header2, request, 1000ms);
-
-        ASSERT_TRUE(result.has_value()) << "Server failed to recover after malformed request";
-        EXPECT_EQ(result.value().result, 40) << "Server returned wrong result after recovery";
-    }
-    catch (const zmq::error_t &e)
-    {
-        FAIL() << "Unexpected ZMQ error after malformed request: " << e.what();
-    }
+    ASSERT_TRUE(result.has_value()) << "Server failed to recover after malformed request";
+    EXPECT_EQ(result.value().result, 40) << "Server returned wrong result after recovery";
 }
