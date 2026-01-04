@@ -27,5 +27,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # project
 project(zmq_example)
 
-add_executable(zmq_example main.cpp)
+set(APP_SRCS
+    src/ExampleService.cpp
+    main.cpp
+)
+
+add_executable(zmq_example ${APP_SRCS})
 target_link_libraries(zmq_example PRIVATE libzmq-static cppzmq)
+target_include_directories(zmq_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
