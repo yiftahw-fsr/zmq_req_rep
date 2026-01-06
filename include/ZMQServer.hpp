@@ -47,7 +47,7 @@ public:
              std::is_standard_layout_v<Req> &&
              std::is_trivially_copyable_v<Rep> &&
              std::is_standard_layout_v<Rep>
-    void register_handler(uint32_t endpoint_id, std::function<Rep(Req)> handler)
+    void on(uint32_t endpoint_id, std::function<Rep(Req)> handler)
     {
         // Type erasure wrapper to have a homogeneous dispatch table
         auto wrapper = [handler = std::move(handler)](std::vector<zmq::message_t>& msgs) -> ServerReply {
@@ -83,6 +83,7 @@ public:
 
     // Start server in a thread
     void start() {
+        initialize();
         running_ = true;
         server_thread_ = std::thread([this]() { this->run_loop(); });
     }
@@ -96,6 +97,10 @@ public:
     }
 
 protected:
+    /// Optional initialization hook
+    /// Can be overridden in derived classes to register handlers
+    virtual void initialize() {}
+
     void run_loop() {
         zmq::context_t ctx{1};
         zmq::socket_t sock{ctx, zmq::socket_type::rep};
